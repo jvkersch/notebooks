@@ -51,8 +51,13 @@ function create_experiment(ks, x0, T, n, σ)
     ts, νs, ts_dense, νs_dense
 end
 
-@model function fitryra(data, prob)
-    σ ~ InverseGamma(2, 3)
+# TODO: remove the transpose from the evocation
+@model function fitryra(ts1, νs1, ts2, νs2, prob)
+    # Note: data is a 3 x k array of the observed reaction rates
+
+    σ1² ~ InverseGamma(2, 3)
+    σ2² ~ InverseGamma(2, 3)
+
     k1 ~ Uniform(0, 10000)
     k2 ~ Uniform(0, 10000)
     k3 ~ Uniform(0, 10000)
@@ -60,16 +65,28 @@ end
     k5 ~ Uniform(0, 10000)
     k6 ~ Uniform(0, 10000)
     ks = [k1, k2, k3, k4, k5, k6]
-
     prob = remake(prob, ks=ks)
-    predicted = solve(prob, saveat=1.0)
+
+    # Forward solve dataset 1
+    predicted = solve(prob, saveat=ts1)
 
     for i = 1:length(predicted)
         x1, x2, x3, x4 = predicted[i]
         ν₁ = -k1*x1 + k2*x3
         ν₂ =  k3*x1 - k4*x2
         ν₃ =  k5*x1 - k6*x4
-        data[:,i] ~ MvNormal([ν₁, ν₂, ν₃], σ)
+        νs1[:,i] ~ MvNormal([ν₁, ν₂, ν₃], sqrt(σ1²))
+    end
+
+    # Forward solve dataset 2
+    predicted = solve(prob, saveat=ts2)
+
+    for i = 1:length(predicted)
+        x1, x2, x3, x4 = predicted[i]
+        ν₁ = -k1*x1 + k2*x3
+        ν₂ =  k3*x1 - k4*x2
+        ν₃ =  k5*x1 - k6*x4
+        νs2[:,i] ~ MvNormal([ν₁, ν₂, ν₃], sqrt(σ2²))
     end
 end
 
@@ -96,11 +113,12 @@ display(p)
 savefig("samples2.png")
 
 prob = ODEProblem(ryra!, x0, (0.0,10.0), ks)
-model = fitryra(transpose(νs1), prob)
+model = fitryra(ts1, transpose(νs1), ts2, transpose(νs2), prob)
 
-# chain = sample(model, NUTS(.65), 500)
-# #chain = mapreduce(c -> sample(model, NUTS(.65),1000), chainscat, 1:3)
+chain = sample(model, NUTS(0.65), MCMCThreads(), 1000, 4)
+#chain = sample(model, NUTS(.65), 500)
+#chain = mapreduce(c -> sample(model, NUTS(.65),1000), chainscat, 1:4)
 
-# p = plot(chain)
-# display(p)
+p = plot(chain)
+display(p)
 # savefig(p, "predictions.png")
