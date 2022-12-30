@@ -1,0 +1,340 @@
+---
+title: "Nonlinear fits for log reduction data"
+output: html_document
+date: "2022-12-13"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(broom)
+library(dplyr)
+library(ggplot2)
+library(pkgcond)
+library(purrr)
+library(readxl)
+library(rlang)
+library(rsample)
+library(scales)
+library(tidyr)
+
+```
+
+```{r}
+# Number of bootstrap samples
+R <- 2000
+#R <- 200
+
+# Fix seed for reproducibility
+set.seed(12345)
+```
+
+
+## Read data
+
+```{r}
+FNAME <- "20221109_Email to Prof Joris.xlsx"
+
+read_data <- function(sheet) {
+  suppress_messages(
+    read_excel(FNAME, sheet=sheet, .name_repair = "universal")) %>%
+    rename(log_reduction=Log.Reduction,
+           measured_fc=Measured.FC..mg.L.,
+           orp=ORP..mV.,
+           ph=pH) %>%
+    mutate(name = sheet, dummy_ph = (ph - 6.5)/2) %>%
+    mutate_at(vars(ph), factor) %>%
+    select(log_reduction, measured_fc, orp, ph, name, dummy_ph) %>%
+    drop_na()
+}
+
+read_bs <- function() {
+  suppress_messages(
+    read_excel(FNAME, sheet="B. subtilis", .name_repair = "universal")) %>%
+    rename(log_reduction=Log.Reduction,
+           measured_fc=Measured.FC..mg.L.,
+           orp=ORP..mV.,
+           ph=pH,
+           time=Time..min.) %>%
+    mutate(name = "B. subtilis", dummy_ph = (ph - 6.5)/2) %>%
+    mutate_at(vars(ph), factor) %>%
+    select(log_reduction, measured_fc, orp, ph, time, name, dummy_ph) %>%
+    drop_na()
+}
+
+read_ec <- function() read_data("E. coli")
+read_li <- function() read_data("L. innocua")
+```
+
+```{r}
+data_ec <- read_ec()
+data_li <- read_li()
+data_bs <- read_bs()
+
+head(data_ec)
+head(data_li)
+head(data_bs)
+```
+
+## Plot raw data
+
+### E. coli, L. innocua
+
+```{r}
+rbind(data_ec, data_li) %>%
+  ggplot(aes(x=orp, y=log_reduction, color = ph)) + 
+    geom_point() + 
+    xlab("ORP") +
+    ylab("Log reduction") +
+    facet_grid(rows = vars(name))
+
+```
+
+### B. subtilis
+
+For _B. subtilis_, we distinguish between the different time points where measurements were taken.
+
+```{r}
+ggplot(data_bs, aes(x=orp, y=log_reduction, color=ph)) +
+  geom_point() + 
+  xlab("ORP") +
+  ylab("Log reduction") +
+  ggtitle("B. subtilis") +
+  facet_grid(rows = vars(time))
+
+```
+
+## Logistic model for E. coli, L. innocua
+
+The log reduction for _E. coli_ and _L. innocua_ looks "S-like", so that it makes sense to try and fit a logistic model. In its simplest form, the logistic model is given by 
+$$
+  LR = \frac{\mathrm{Asym}}{1 + \exp((\mathrm{xmid} - ORP)/\mathrm{scal})},
+$$
+with the following parameters:
+
+- $\mathrm{Asym}$: the horizontal asymptote as $ORP$ increases
+- $\mathrm{xmid}$: the $x$-value of the halfway point of the curve
+- $\mathrm{scal}$: the scale parameter (growth rate).
+
+For each of these parameters, we want to take the effect of differing pH values into account. In other words, we want to express that each parameter can have two different values, one for each pH value. To do this, we introduce a dummy variable $\delta$, with $\delta = 0$ for pH 6.5, and $\delta = 1$ for pH 8.5, and we let each parameter depend linearly on $\delta$. In other words, we put
+$$
+  \mathrm{Asym} \to \mathrm{Asym} + \delta \times \mathrm{dAsym}.
+$$
+and similarly for the other parameters.
+
+The net result of this parametrization is that it will allow us to check whether each of the three model parameters $\mathrm{Asym}$, $\mathrm{xmid}$, $\mathrm{scal}$ differ significantly between pH 6.5 and 8.5. To figure this out, we just need to check the values of $\mathrm{dAsym}$, $\mathrm{dxmid}$, and $\mathrm{dscal}$, and their confidence intervals. We are particularly interested in $\mathrm{dxmid}$, since a significant difference in $\mathrm{xmid}$ indicates a shift in the fitted logistic curves for different pH.
+
+Confidence intervals are calculated through bootstrapping (R's `nls` estimator provides standard errors for estimated parameters, but I am not sure that the assumptions that go into it are really warranted).
+
+### Model implementation
+
+```{r}
+# Starting values obtained through visual inspection
+
+fit_logistic <- function(split) {
+  tryCatch(nls(
+    log_reduction ~ 
+      (Asym + Asym_delta * dummy_ph) / (
+        1 + exp((xmid + xmid_delta * dummy_ph - orp)/(
+          scal + scal_delta * dummy_ph))),
+    start = list(Asym = 3.5, 
+                 Asym_delta = 0,
+                 xmid = 600, 
+                 xmid_delta = -50,
+                 scal = 30,
+                 scal_delta = 5),
+    data = analysis(split), 
+    control = list(maxiter = 100)),
+    error = function(cnd) NULL)
+}
+```
+
+### E. coli
+
+We take `R` bootstrap samples (with `R` configurable, see the top of this document) and fit the logistic model to each. Some fits are not successful, but in most runs the number of these fits does not exceed 1-2%.
+
+```{r}
+boots <- bootstraps(data_ec, times = R, apparent = TRUE)
+boot_models <-
+  boots %>% 
+  mutate(model = map(splits, fit_logistic),
+         coef_info = map(model, tidy))
+boot_coefs <- 
+  boot_models %>% 
+  unnest(coef_info)
+```
+
+The coefficients of the bootstrapped models give us access to confidence intervals for each of the parameters. I've applied a relatively strong Bonferroni correction here: since we have 6 parameters to consider, the significance level is reduced to  5%/6 = 0.83%. This is probably waay too stringent, since we are basically only interested in 1 parameter ($\mathrm{dxmid}$). However, the conclusions from our test don't change with this decreased significance level, so we may as well do it.
+
+```{r}
+percentile_intervals <- 
+  int_pctl(boot_models, coef_info, alpha = 0.05/6)
+percentile_intervals
+```
+
+We can also plot histograms of the parameter values, with their confidence intervals. If we look at the "delta" parameters, we see that only for $\mathrm{dxmid}$ the confidence interval does not include 0. **We conclude that, for different pH values, the curves are shifted relative to one another, but the horizontal asymptote and growth rate are not significantly different.**
+
+```{r}
+ggplot(boot_coefs, aes(estimate)) +
+  geom_histogram(bins = 30) +
+  facet_wrap( ~ term, scales = "free", ncol = 2) +
+  geom_vline(aes(xintercept = .lower), data = percentile_intervals, col = "blue") +
+  geom_vline(aes(xintercept = .upper), data = percentile_intervals, col = "blue")
+
+```
+
+Last, we can also plot the uncertainty in the model fit, through a so-called "spaghetti plot". This gives us a similar qualitative insight as what we obtained from the confidence intervals: the curves are noticeably offset from another, but have similar horizontal asymptotes and growth rates.
+
+```{r}
+boot_aug <- 
+  boot_models %>% 
+  sample_n(200) %>% 
+  mutate(augmented = map(model, augment)) %>% 
+  unnest(augmented) %>%
+  mutate(ph = factor(ifelse(dummy_ph == 0, 6.5, 8.5)))
+
+ggplot(boot_aug) +
+  geom_line(aes(x = orp, y = .fitted,
+                group = interaction(id, ph), 
+                color = ph), alpha = .2) +
+  geom_point(data = data_ec,
+             aes(x = orp, y = log_reduction, fill = ph), pch = 21, color = "black")
+```
+
+### L. innocua
+
+We now do the same analysis for _L. innocua_. The code remains the same, as do the conclusions from the analysis.
+
+```{r}
+boots <- bootstraps(data_li, times = R, apparent = TRUE)
+boot_models <-
+  boots %>% 
+  mutate(model = map(splits, fit_logistic),
+         coef_info = map(model, tidy))
+boot_coefs <- 
+  boot_models %>% 
+  unnest(coef_info)
+```
+
+```{r}
+percentile_intervals <- 
+  int_pctl(boot_models, coef_info, alpha = 0.05/6)
+percentile_intervals
+```
+
+```{r}
+ggplot(boot_coefs, aes(estimate)) +
+  geom_histogram(bins = 30) +
+  facet_wrap( ~ term, scales = "free", ncol = 2) +
+  geom_vline(aes(xintercept = .lower), data = percentile_intervals, col = "blue") +
+  geom_vline(aes(xintercept = .upper), data = percentile_intervals, col = "blue")
+
+```
+
+```{r}
+boot_aug <- 
+  boot_models %>% 
+  sample_n(200) %>% 
+  mutate(augmented = map(model, augment)) %>% 
+  unnest(augmented) %>%
+  mutate(ph = factor(ifelse(dummy_ph == 0, 6.5, 8.5)))
+
+ggplot(boot_aug) +
+  geom_line(aes(x = orp, y = .fitted,
+                group = interaction(id, ph), 
+                color = ph), alpha = .2) +
+  geom_point(data = data_li,
+             aes(x = orp, y = log_reduction, fill = ph), pch = 21, color = "black")
+```
+
+## Exponential model for B. subtilis
+
+For _B. subtilis_ the analysis is somewhat different. The dataset contains measurements after different amounts of time have elapsed, which need to be treated differently. Secondly, the data doesn't show the typical inflection point and flatting towards the horizontal asymptote of the logistic model.
+
+To accommodate the latter, we fit an exponential model, rather than a logistic model:
+$$
+  LR = A\exp(C \times ORP).
+$$
+Here $C$ again plays the role of some sort of "growth rate", and significant chances in $C$ between the different pH levels will indicate qualitatively different growth profiles.
+
+To account for the effect of time, we let $C$ increase linearly with time, so that the model becomes
+$$
+  LR = A\exp((C + B(t - 15))\times ORP).
+$$
+Moreover, we let $A$, $B$, and $C$ depend on the dummy variable encoding for pH, just as we did for the logistic model. This introduces three more parameters $\mathrm{dA}$, $\mathrm{dB}$, $\mathrm{dC}$ into the model, which describe the change in $A$, $B$, $C$ as the pH increases from 6.5 to 8.5.
+
+Last, to help with the convergence of the fitting procedure, we normalize the ORP values by subtracting the mean and dividing by the standard deviation. 
+
+```{r}
+data_bs_norm <- data_bs %>%
+  mutate(s_orp = (orp - mean(orp))/sd(orp))
+```
+
+The exponential model (implementation below) is the only thing that differs for _B. subtilis_. The rest of the code (fitting, bootstrapping, and plotting) stays the same.
+
+```{r}
+fit_exponential <- function(split) {
+  tryCatch(nls(log_reduction ~ 
+        (a + a_delta*dummy_ph) * exp(
+          ((c + c_delta*dummy_ph) + 
+             (b + b_delta*dummy_ph)*(time-15))*s_orp), 
+      data = analysis(split),
+      start = list(a = 1, 
+                   a_delta = 0,
+                   b = 0.5, 
+                   b_delta = 0,
+                   c = 1,
+                   c_delta = 0)),
+      error = function(cnd) NULL)
+}
+```
+
+```{r}
+boots <- bootstraps(data_bs_norm, times = R, apparent = TRUE)
+boot_models <-
+  boots %>% 
+  mutate(model = map(splits, fit_exponential),
+         coef_info = map(model, tidy))
+boot_coefs <- 
+  boot_models %>% 
+  unnest(coef_info)
+
+```
+
+```{r}
+percentile_intervals <- 
+  int_pctl(boot_models, coef_info, alpha = 0.05/6)
+percentile_intervals
+```
+
+The parameter that is most of interest to us is $\mathrm{dC}$ (labelled as `c_delta` on the figure below). Recall that $C$ controls the growth rate of the exponential curve: low values of $C$ indicate "shallow" exponentials, and high values "steeper" ones. The parameter $\mathrm{dC}$ indicates whether there is a difference in growth rate between the two different pH levels. **As the confidence interval for $\mathrm{dC}$ does not include 0, we see that this is indeed the case.**
+
+```{r}
+ggplot(boot_coefs, aes(estimate)) +
+  geom_histogram(bins = 30) +
+  facet_wrap( ~ term, scales = "free", ncol = 2) +
+  geom_vline(aes(xintercept = .lower), data = percentile_intervals, col = "blue") +
+  geom_vline(aes(xintercept = .upper), data = percentile_intervals, col = "blue")
+
+```
+
+The spaghetti plot shows the same conclusion: the increase in log reduction is noticably steeper for pH 8.5, than for pH 6.5. This holds across all four different times.
+
+```{r}
+boot_aug <- 
+  boot_models %>% 
+  sample_n(200) %>% 
+  mutate(augmented = map(model, augment)) %>% 
+  unnest(augmented) %>%
+  mutate(ph = factor(ifelse(dummy_ph == 0, 6.5, 8.5)))
+
+ggplot(boot_aug) +
+  geom_line(aes(x = s_orp, y = .fitted,
+                group = interaction(id, ph), 
+                color = ph), alpha = .2) +
+  geom_point(data = data_bs_norm,
+             aes(x = s_orp, y = log_reduction, fill = ph), pch = 21, color = "black") + 
+  facet_wrap(vars(time))
+```
