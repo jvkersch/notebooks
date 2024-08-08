@@ -13,15 +13,14 @@ async def service_info(request):
     })
 
 
-class CustomHeaderMiddleware(BaseHTTPMiddleware):
-    # Adapted from https://github.com/fastapi/fastapi/issues/3027
+class CustomHeaderMiddleware:
+
+    def __init__(self, app):
+        self.app = app
 
     async def __call__(self, scope, receive, send):
         scope["headers"].append((b"my-header", b"12345"))
-        await super().__call__(scope, receive, send)
-
-    async def dispatch(self, request, call_next):
-        return await call_next(request)
+        await self.app(scope, receive, send)
 
 
 routes = [
