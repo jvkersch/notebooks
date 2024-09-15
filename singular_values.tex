@@ -1,0 +1,27 @@
+\documentclass{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath, amssymb, amsfonts}
+
+\usepackage{biblatex}
+\addbibresource{singular_values_bibliography.bib}
+
+\begin{document}
+
+Let $X \in \mathbb{R}^{n \times m}$ be a random matrix whose entries are independent Gaussian variables with mean 0 and standard deviation 1, and denote the smallest singular value of $X$ by $\sigma_{\text{min}}$. In \cite[corollary 3.1]{1988-edelman-EigenvaluesConditionNumbers} it was shown that $n \sigma_{\text{min}}$ converges in probability to a random variable with a known probability density, and more specifically that
+\[
+  P(n(\sigma_{\text{min}})^2 \le \epsilon) = \int_0^\epsilon \frac{1 + \sqrt{x}}{2\sqrt{x}} e^{-(x/2 + \sqrt{x})} \, \mathrm{d}x + o(1).
+\]
+for all $\epsilon > 0$. In \cite{2009-tao-RandomMatricesDistribution} it was shown that the integral on the right hand side is equal to $C_\epsilon = 1 - e^{-\epsilon/2 - \sqrt{\epsilon}}$. They also showed that the $o(1)$ term is of the form $O(n^{-c})$ for $c$ constant, but we won't need that bound. We can just use the fact that $o(1)$ is bounded by a constant for large enough $n$, and absorb this constant into $C_\epsilon$, so that 
+\[
+  P(n(\sigma_{\text{min}})^2 \le \epsilon) = C_\epsilon,
+\]
+or equivalently
+\[
+  P\left(\sigma_{\text{min}} \le \sqrt{\frac{\epsilon}{n}} \right) = C_\epsilon.
+\]
+Note that the constant $C_\epsilon$ does not depend on $n$, and that it can be made arbitrarily close to 1 by choosing $\epsilon$ large enough. This tells us that as the dimension of the matrix increases, the smallest singular value is bounded by a term proportional to $1/\sqrt{n}$, in a probabilistic sense.
+\printbibliography
+
+\end{document}
