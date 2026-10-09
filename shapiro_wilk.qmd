@@ -1,0 +1,138 @@
+---
+title: "Shapiro-Wilk excursions"
+format: html
+---
+
+```{r}
+library(tidyverse)
+```
+
+## False positive/negative rate for Shapiro-Wilk
+
+Just to build some intuition for the sensitivity of the Shapiro-Wilk test: how quickly is the null hypothesis rejected as a function of the sample size?
+
+```{r}
+sw_p_values <- function(size, rdist, n_reps = 1000)
+    replicate(
+        n_reps, 
+        shapiro.test(rdist(size))$p
+    )
+
+create_data <- function(sample_sizes, rdist)
+    tibble(
+        sample_size = sample_sizes,
+        p_value = map(
+            sample_sizes,
+            sw_p_values,
+            rdist = rdist)
+    ) |>
+        unnest_longer(p_value)
+
+sample_sizes <- c(10, 20, 50, 100)
+create_data(sample_sizes, rnorm) |>
+    ggplot(aes(x = p_value, group = sample_size)) +
+    geom_histogram(alpha = 0.7) +
+    facet_wrap(~sample_size, ncol = 2)
+```
+
+```{r}
+alpha <- 0.05
+
+summarize_p_values <- function(data) {
+    data |>
+        mutate(significant = p_value < alpha) |>
+        group_by(sample_size) |>
+        summarize(pct_significant = mean(significant))
+}
+
+norm_data <- create_data(sample_sizes, rnorm) |> 
+    summarize_p_values()
+unif_data <- create_data(sample_sizes, runif) |> 
+    summarize_p_values()
+exp_data <- create_data(sample_sizes, rexp) |> 
+    summarize_p_values()
+
+rt_no_df <- \(n) rt(n, df = 10)
+t_data <- create_data(sample_sizes, rt_no_df) |> 
+    summarize_p_values()
+
+bind_rows(
+    normal = norm_data,
+    uniform = unif_data,
+    exponential = exp_data,
+    student_t = t_data,
+    .id = "distribution"
+) |> ggplot(aes(x = as.factor(sample_size), y = pct_significant, fill = distribution)) + 
+    geom_bar(stat = "identity") +
+    facet_wrap(~distribution, ncol = 2, scales = "free_y")
+
+```
+
+## Power for small samples
+
+```{r}
+summarize_p_values <- function(data) {
+    data |>
+        mutate(insignificant = p_value > alpha) |>
+        group_by(sample_size) |>
+        summarize(type_2_error = mean(insignificant))
+}
+
+exp_data <- create_data(sample_sizes, rexp) |> 
+    summarize_p_values()
+unif_data <- create_data(sample_sizes, runif) |> 
+    summarize_p_values()
+t_data <- create_data(sample_sizes, rt_no_df) |> 
+    summarize_p_values()
+
+bind_rows(
+    uniform = unif_data,
+    exponential = exp_data,
+    student_t = t_data,
+    .id = "distribution"
+) |>
+    ggplot(aes(x = as.factor(sample_size), y  = type_2_error, group = distribution, color = distribution)) +
+    geom_point() + 
+    geom_line() +
+    xlab("Sample size") +
+    ylab("Type II error")
+
+```
+
+## Using SW to determine the type of test
+
+```{r}
+strategy1 <- function(rfun, n, alpha_pre) {
+    # generate data
+    s1 <- rfun(n)
+    s2 <- rfun(n)
+
+    # normality
+    p1 <- shapiro.test(s1)$p
+    p2 <- shapiro.test(s2)$p
+
+    # t-test if both normal, mann-whitney U otherwise
+    is_normal <- (p1 > alpha_pre) && (p2 > alpha_pre)
+    if (is_normal) {
+        res <- t.test(s1, s2)
+    } else {
+        res <- wilcox.test(s1, s2, exact = FALSE)
+    }
+
+    data.frame(
+        p_pre1 = p1,
+        p_pre2 = p2,
+        is_normal = is_normal,
+        p = res$p.value
+    )
+}
+```
+
+
+```{r}
+1:1000 |>
+    map(\(n) strategy1(rnorm, 20, 0.10)) |>
+    list_rbind() |>
+    mutate(significant = p < 0.05) |>
+    summarize(fpr = sum(significant) / 1000)
+```
